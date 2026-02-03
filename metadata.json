@@ -1,0 +1,8 @@
+{
+  "name": "AI Career Forge: AI/Algorithm Path",
+  "description": "An end-to-end career assistant for AI developers featuring voice-first discovery, JD analysis, STAR resume generation, and mock interviewing.",
+  "requestFramePermissions": [
+    "microphone",
+    "camera"
+  ]
+}
