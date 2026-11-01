@@ -1,213 +1,225 @@
-
-import React, { useState, useEffect, useRef } from 'react';
-import { ProjectAsset, JDData } from '../types';
-import { getAI, decodeBase64, encodeAudio, decodeAudioData } from '../services/geminiService';
-import { LiveServerMessage, Modality, Type } from '@google/genai';
+import React, { useState } from 'react';
+import { ChatTurn, JDData, ProjectAsset } from '../types';
+import ErrorBanner from './ErrorBanner';
+import { useDictation } from '../hooks/useDictation';
+import { coachTurn, extractAssetsFromText } from '../services/career';
+import { reportModelError } from '../services/errors';
+import { createId } from '../services/modelJson';
 
 interface Props {
-  onAssetsUpdate: (assets: ProjectAsset[]) => void;
+  assets: ProjectAsset[];
+  chat: ChatTurn[];
   currentJd: JDData | null;
-  existingAssets: ProjectAsset[];
+  onAssetsAdd: (assets: ProjectAsset[]) => void;
+  onAssetDelete: (id: string) => void;
+  onChatChange: (chat: ChatTurn[]) => void;
+  onNeedKey: (hint: string) => void;
 }
 
-const Step1Discovery: React.FC<Props> = ({ onAssetsUpdate, currentJd, existingAssets }) => {
-  const [isCalling, setIsCalling] = useState(false);
-  const [transcript, setTranscript] = useState<{role: string, text: string}[]>([]);
-  const [processing, setProcessing] = useState(false);
+const emptyManual = {
+  name: '',
+  background: '',
+  tasks: '',
+  actions: '',
+  results: '',
+  techStack: '',
+  challenges: '',
+};
+
+const Step1Discovery: React.FC<Props> = ({ assets, chat, currentJd, onAssetsAdd, onAssetDelete, onChatChange, onNeedKey }) => {
+  const [mode, setMode] = useState<'chat' | 'paste'>('chat');
+  const [input, setInput] = useState('');
+  const [paste, setPaste] = useState('');
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  
-  const currentInputTranscription = useRef('');
-  const currentOutputTranscription = useRef('');
+  const [info, setInfo] = useState<string | null>(null);
+  const [manual, setManual] = useState(emptyManual);
+  const dictation = useDictation((transcript) => setInput(transcript));
 
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const outputAudioContextRef = useRef<AudioContext | null>(null);
-  const sessionRef = useRef<any>(null);
-  const nextStartTimeRef = useRef(0);
-  const sourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
-
-  const startCall = async () => {
+  const runCoach = async (history: ChatTurn[]) => {
+    setLoading(true);
+    setError(null);
+    setInfo(null);
     try {
-      setError(null);
-      setIsCalling(true);
-      const ai = getAI();
-      
-      audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
-      outputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
-      
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-
-      const jdContext = currentJd 
-        ? `候选人当前正对标 ${currentJd.company} 的 ${currentJd.title} 岗位。
-           该岗位核心关键词为：${currentJd.keywords.join(', ')}。
-           请在交流中，优先引导候选人挖掘与这些关键词相关的技术细节。`
-        : '候选人目前尚未选定具体岗位，请进行通用的 AI/算法项目深度挖掘。';
-
-      const sessionPromise = ai.live.connect({
-        model: 'gemini-2.5-flash-native-audio-preview-12-2025',
-        config: {
-          responseModalities: [Modality.AUDIO],
-          systemInstruction: `你是一位国内顶尖大厂（如字节跳动、阿里巴巴）的 AI 算法资深面试官。你的目标是通过语音电话引导候选人详细描述他们的项目。请使用中文交流。运用 STAR 法则进行追问。
-          ${jdContext}
-          特别关注：模型选型理由、业务具体痛点、解决的技术难点、以及可量化的核心指标。每次只问一个问题。开场白要专业：你好，我是面试官，咱们开始深度挖掘你的项目库，你想先聊哪一个最具代表性的项目？`,
-          inputAudioTranscription: {},
-          outputAudioTranscription: {},
-          speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } } }
-        },
-        callbacks: {
-          onopen: () => {
-            const source = audioContextRef.current!.createMediaStreamSource(stream);
-            const scriptProcessor = audioContextRef.current!.createScriptProcessor(4096, 1, 1);
-            scriptProcessor.onaudioprocess = (e) => {
-              const inputData = e.inputBuffer.getChannelData(0);
-              const base64Data = encodeAudio(inputData);
-              sessionPromise.then(session => {
-                session.sendRealtimeInput({ media: { data: base64Data, mimeType: 'audio/pcm;rate=16000' } });
-              }).catch(err => console.error(err));
-            };
-            source.connect(scriptProcessor);
-            scriptProcessor.connect(audioContextRef.current!.destination);
-          },
-          onmessage: async (msg: LiveServerMessage) => {
-            if (msg.serverContent?.modelTurn?.parts[0]?.inlineData) {
-              const data = msg.serverContent.modelTurn.parts[0].inlineData.data;
-              const ctx = outputAudioContextRef.current!;
-              nextStartTimeRef.current = Math.max(nextStartTimeRef.current, ctx.currentTime);
-              const buffer = await decodeAudioData(decodeBase64(data), ctx);
-              const source = ctx.createBufferSource();
-              source.buffer = buffer;
-              source.connect(ctx.destination);
-              source.start(nextStartTimeRef.current);
-              nextStartTimeRef.current += buffer.duration;
-              sourcesRef.current.add(source);
-            }
-
-            if (msg.serverContent?.outputTranscription) {
-              currentOutputTranscription.current += msg.serverContent.outputTranscription.text;
-            } else if (msg.serverContent?.inputTranscription) {
-              currentInputTranscription.current += msg.serverContent.inputTranscription.text;
-            }
-
-            if (msg.serverContent?.turnComplete) {
-              if (currentInputTranscription.current) {
-                setTranscript(prev => [...prev, { role: '用户', text: currentInputTranscription.current }]);
-                currentInputTranscription.current = '';
-              }
-              if (currentOutputTranscription.current) {
-                setTranscript(prev => [...prev, { role: '面试官', text: currentOutputTranscription.current }]);
-                currentOutputTranscription.current = '';
-              }
-            }
-          },
-          onclose: () => setIsCalling(false),
-          onerror: (e) => {
-            setError("语音服务波动，请重试。");
-            setIsCalling(false);
-          }
-        }
-      });
-      sessionRef.current = await sessionPromise;
-    } catch (err: any) {
-      setError("无法连接语音服务。");
-      setIsCalling(false);
+      const reply = await coachTurn(history, currentJd);
+      onChatChange([...history, { id: createId(), role: 'assistant', content: reply }]);
+    } catch (err) {
+      setError(reportModelError(err, onNeedKey));
+    } finally {
+      setLoading(false);
     }
   };
 
-  const endCall = async () => {
-    if (sessionRef.current) {
-      sessionRef.current.close();
-      setIsCalling(false);
-      setProcessing(true);
-      
-      try {
-        const ai = getAI();
-        const summaryResponse = await ai.models.generateContent({
-          model: 'gemini-3-flash-preview',
-          contents: `提取对话中的项目信息，转为 JSON。对话历史: ${JSON.stringify(transcript)}`,
-          config: {
-            responseMimeType: 'application/json',
-            responseSchema: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  id: { type: Type.STRING },
-                  name: { type: Type.STRING },
-                  background: { type: Type.STRING },
-                  tasks: { type: Type.STRING },
-                  actions: { type: Type.STRING },
-                  results: { type: Type.STRING },
-                  techStack: { type: Type.ARRAY, items: { type: Type.STRING } },
-                  challenges: { type: Type.STRING }
-                },
-                required: ["id", "name", "background", "tasks", "actions", "results", "techStack", "challenges"]
-              }
-            }
-          }
-        });
-        
-        const assets = JSON.parse(summaryResponse.text);
-        onAssetsUpdate(assets);
-        setTranscript([]);
-      } catch (err) {
-        setError("素材处理失败，请重试。");
-      } finally {
-        setProcessing(false);
+  const send = async () => {
+    const text = input.trim();
+    if (!text || loading) return;
+    dictation.stop();
+    const next = [...chat, { id: createId(), role: 'user' as const, content: text }];
+    onChatChange(next);
+    setInput('');
+    await runCoach(next);
+  };
+
+  const extract = async (source: string) => {
+    const text = source.trim();
+    if (!text || loading) return;
+    setLoading(true);
+    setError(null);
+    setInfo(null);
+    try {
+      const extracted = await extractAssetsFromText(text);
+      if (extracted.length === 0) {
+        setInfo('没有识别到具体项目。请补充你做了什么、用了什么技术、结果如何。');
+        return;
       }
+      onAssetsAdd(extracted);
+      setInfo(`已加入 ${extracted.length} 条项目素材。刷新页面后仍会保留。`);
+      if (mode === 'paste') setPaste('');
+    } catch (err) {
+      setError(reportModelError(err, onNeedKey));
+    } finally {
+      setLoading(false);
     }
   };
+
+  const addManual = () => {
+    if (!manual.name.trim()) {
+      setError('手动添加时至少填写项目名称。');
+      return;
+    }
+    onAssetsAdd([{
+      id: createId(),
+      name: manual.name.trim(),
+      background: manual.background.trim(),
+      tasks: manual.tasks.trim(),
+      actions: manual.actions.trim(),
+      results: manual.results.trim() || '未提供量化结果',
+      techStack: manual.techStack.split(/[,，、]/).map((item) => item.trim()).filter(Boolean),
+      challenges: manual.challenges.trim(),
+    }]);
+    setManual(emptyManual);
+    setError(null);
+    setInfo('已手动加入素材库。');
+  };
+
+  const chatSource = chat.map((turn) => `${turn.role === 'user' ? '候选人' : '面试官'}：${turn.content}`).join('\n');
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-      <div className="lg:col-span-2 flex flex-col items-center justify-center p-8 bg-white rounded-3xl shadow-sm min-h-[500px] border border-slate-100">
-        <div className="text-center mb-8">
-          <h2 className="text-2xl font-bold text-slate-800 mb-2">项目深度挖掘</h2>
+    <div className="grid grid-cols-1 gap-8 lg:grid-cols-3">
+      <div className="rounded-3xl border border-slate-100 bg-white p-6 shadow-sm lg:col-span-2 lg:p-8">
+        <div className="mb-6">
+          <h2 className="text-2xl font-bold text-slate-800">项目深度挖掘</h2>
           {currentJd ? (
-            <div className="inline-flex items-center gap-2 px-3 py-1 bg-blue-50 text-blue-600 rounded-full text-xs font-bold border border-blue-100 animate-pulse">
-              <i className="fas fa-bullseye"></i> 正在针对 {currentJd.company} 进行精准挖掘
+            <div className="mt-2 inline-flex items-center gap-2 rounded-full border border-blue-100 bg-blue-50 px-3 py-1 text-xs font-bold text-blue-600">
+              <i className="fas fa-bullseye"></i> 正在针对 {currentJd.company} · {currentJd.title} 追问
             </div>
           ) : (
-            <p className="text-slate-500 text-sm">建议先去“JD解析”上传目标岗位，以获得更精准的引导</p>
+            <p className="mt-2 text-sm text-slate-500">可以先聊项目，也可以去「JD 解析」选定岗位后再回来，追问会更贴关键词。</p>
           )}
         </div>
 
-        {error && <div className="mb-4 text-red-500 text-sm">{error}</div>}
+        <div className="mb-4 flex gap-2">
+          <button type="button" onClick={() => setMode('chat')} className={`rounded-xl px-4 py-2 text-sm font-bold ${mode === 'chat' ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-600'}`}>对话挖掘</button>
+          <button type="button" onClick={() => setMode('paste')} className={`rounded-xl px-4 py-2 text-sm font-bold ${mode === 'paste' ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-600'}`}>粘贴经历</button>
+        </div>
 
-        {!isCalling && !processing && (
-          <button onClick={startCall} className="w-24 h-24 rounded-full bg-blue-600 text-white flex flex-col items-center justify-center gap-2 shadow-xl hover:bg-blue-700 transition-all">
-            <i className="fas fa-phone text-2xl"></i>
-            <span className="text-[10px] font-black uppercase tracking-widest">Start Call</span>
-          </button>
-        )}
+        <ErrorBanner message={error || dictation.error} />
+        {info && <div className="mb-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">{info}</div>}
 
-        {isCalling && (
-          <div className="flex flex-col items-center w-full">
-            <div className="flex gap-1 mb-6 h-8">
-              {[...Array(8)].map((_, i) => <div key={i} className="w-1.5 bg-blue-500 rounded-full animate-bounce" style={{animationDelay: `${i*0.1}s`}}></div>)}
+        {mode === 'chat' ? (
+          <>
+            <div className="mb-4 max-h-[420px] min-h-[240px] space-y-3 overflow-y-auto rounded-2xl bg-slate-50 p-4">
+              {chat.length === 0 && (
+                <div className="py-8 text-center text-sm text-slate-400">
+                  <p className="mb-4">用文字把项目讲清楚。语音只是可选输入，麦克风不可用时直接打字。</p>
+                  <button type="button" disabled={loading} onClick={() => runCoach([])} className="rounded-xl bg-white px-4 py-2 text-sm font-bold text-blue-600 shadow-sm">
+                    让面试官先提问
+                  </button>
+                </div>
+              )}
+              {chat.map((turn) => (
+                <div key={turn.id} className={`flex ${turn.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                  <div className={`max-w-[85%] whitespace-pre-wrap rounded-2xl px-4 py-3 text-sm leading-relaxed ${turn.role === 'user' ? 'bg-blue-600 text-white' : 'bg-white text-slate-700 shadow-sm'}`}>
+                    {turn.content}
+                  </div>
+                </div>
+              ))}
+              {loading && <p className="text-xs text-slate-400">正在思考下一个问题…</p>}
             </div>
-            <button onClick={endCall} className="px-6 py-2 bg-red-500 text-white rounded-full font-bold shadow-lg flex items-center gap-2">
-              挂断并沉淀素材
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <textarea
+                data-testid="discovery-input"
+                value={input}
+                onChange={(event) => setInput(event.target.value)}
+                rows={3}
+                placeholder="例如：我在推荐系统里负责召回，把离线 AUC 从 0.71 做到 0.76……"
+                className="w-full resize-none rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-blue-500"
+              />
+              <div className="flex gap-2 sm:flex-col">
+                <button type="button" onClick={() => (dictation.listening ? dictation.stop() : dictation.start(input))} className={`rounded-xl px-4 py-2 text-sm font-bold ${dictation.listening ? 'bg-red-500 text-white' : 'bg-slate-100 text-slate-600'}`} title={dictation.supported ? '语音输入' : '当前浏览器不支持语音识别'}>
+                  <i className={`fas ${dictation.listening ? 'fa-stop' : 'fa-microphone'}`}></i>
+                </button>
+                <button type="button" data-testid="discovery-send" onClick={send} disabled={loading || !input.trim()} className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-bold text-white disabled:opacity-50">
+                  发送
+                </button>
+              </div>
+            </div>
+            <div className="mt-4 flex flex-wrap gap-3">
+              <button type="button" disabled={loading || chat.length === 0} onClick={() => extract(chatSource)} className="rounded-xl border border-blue-200 px-4 py-2 text-sm font-bold text-blue-700 disabled:opacity-40">
+                从对话沉淀素材
+              </button>
+              <button type="button" disabled={loading || chat.length === 0} onClick={() => onChatChange([])} className="rounded-xl px-4 py-2 text-sm font-bold text-slate-400">
+                清空对话
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <textarea
+              value={paste}
+              onChange={(event) => setPaste(event.target.value)}
+              className="mb-4 h-64 w-full resize-none rounded-2xl border border-slate-200 p-4 text-sm outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder="把项目介绍、周报或口述记录贴在这里。模型只整理你写过的事实，不会编造指标。"
+            />
+            <button type="button" onClick={() => extract(paste)} disabled={loading || !paste.trim()} className="rounded-xl bg-blue-600 px-5 py-3 text-sm font-bold text-white disabled:opacity-50">
+              {loading ? '整理中…' : '结构化并加入素材库'}
             </button>
-            <div className="mt-8 w-full max-h-40 overflow-y-auto bg-slate-50 rounded-xl p-4 text-[10px] text-slate-400">
-               {transcript.map((t, i) => <div key={i} className="mb-1"><strong>{t.role}:</strong> {t.text}</div>)}
-            </div>
-          </div>
+          </>
         )}
 
-        {processing && <div className="text-center"><i className="fas fa-spinner animate-spin text-blue-600 text-2xl mb-2"></i><p className="text-sm">正在结构化沉淀项目细节...</p></div>}
+        <details className="mt-6 rounded-2xl bg-slate-50 p-4">
+          <summary className="cursor-pointer text-sm font-bold text-slate-600">手动补一条素材</summary>
+          <div className="mt-4 grid gap-3">
+            <input data-testid="asset-name" value={manual.name} onChange={(event) => setManual({ ...manual, name: event.target.value })} placeholder="项目名称" className="rounded-xl border border-slate-200 px-3 py-2 text-sm" />
+            <input value={manual.background} onChange={(event) => setManual({ ...manual, background: event.target.value })} placeholder="背景" className="rounded-xl border border-slate-200 px-3 py-2 text-sm" />
+            <input value={manual.tasks} onChange={(event) => setManual({ ...manual, tasks: event.target.value })} placeholder="你的任务" className="rounded-xl border border-slate-200 px-3 py-2 text-sm" />
+            <textarea value={manual.actions} onChange={(event) => setManual({ ...manual, actions: event.target.value })} placeholder="关键行动" rows={2} className="rounded-xl border border-slate-200 px-3 py-2 text-sm" />
+            <input value={manual.results} onChange={(event) => setManual({ ...manual, results: event.target.value })} placeholder="结果（没有数字就留空）" className="rounded-xl border border-slate-200 px-3 py-2 text-sm" />
+            <input value={manual.techStack} onChange={(event) => setManual({ ...manual, techStack: event.target.value })} placeholder="技术栈，用逗号分隔" className="rounded-xl border border-slate-200 px-3 py-2 text-sm" />
+            <input value={manual.challenges} onChange={(event) => setManual({ ...manual, challenges: event.target.value })} placeholder="难点" className="rounded-xl border border-slate-200 px-3 py-2 text-sm" />
+            <button type="button" data-testid="asset-save" onClick={addManual} className="justify-self-start rounded-xl bg-slate-900 px-4 py-2 text-sm font-bold text-white">加入素材库</button>
+          </div>
+        </details>
       </div>
 
-      <div className="bg-slate-900 rounded-3xl p-6 text-white h-fit">
-        <h3 className="font-bold text-lg mb-4 flex items-center gap-2"><i className="fas fa-archive text-blue-400"></i> 已沉淀素材库 ({existingAssets.length})</h3>
-        <div className="space-y-3 max-h-[400px] overflow-y-auto pr-2 custom-scrollbar">
-          {existingAssets.map((a, i) => (
-            <div key={i} className="bg-white/5 p-3 rounded-xl border border-white/5">
-              <p className="text-xs font-bold text-blue-300 mb-1">{a.name}</p>
+      <div className="h-fit rounded-3xl bg-slate-900 p-6 text-white lg:sticky lg:top-24">
+        <h3 className="mb-4 flex items-center gap-2 text-lg font-bold"><i className="fas fa-archive text-blue-400"></i> 已沉淀素材库 ({assets.length})</h3>
+        <div className="max-h-[520px] space-y-3 overflow-y-auto pr-1">
+          {assets.map((asset) => (
+            <div key={asset.id} className="rounded-xl border border-white/10 bg-white/5 p-3">
+              <div className="mb-1 flex items-start justify-between gap-2">
+                <p className="text-sm font-bold text-blue-300">{asset.name}</p>
+                <button type="button" onClick={() => onAssetDelete(asset.id)} className="text-slate-500 hover:text-red-300" aria-label={`删除 ${asset.name}`}>
+                  <i className="fas fa-trash-alt text-xs"></i>
+                </button>
+              </div>
+              {asset.results && <p className="mb-2 text-xs leading-relaxed text-slate-300">{asset.results}</p>}
               <div className="flex flex-wrap gap-1">
-                {a.techStack.map((s, si) => <span key={si} className="text-[8px] px-1.5 py-0.5 bg-white/10 rounded">{s}</span>)}
+                {asset.techStack.map((stack) => <span key={stack} className="rounded bg-white/10 px-1.5 py-0.5 text-[10px]">{stack}</span>)}
               </div>
             </div>
           ))}
-          {existingAssets.length === 0 && <p className="text-xs text-slate-500 italic py-10 text-center">空空如也，快开始对话吧</p>}
+          {assets.length === 0 && <p className="py-10 text-center text-xs text-slate-500">还没有素材。对话、粘贴或手动添加后会出现在这里。</p>}
         </div>
       </div>
     </div>
