@@ -1,9 +1,14 @@
-
 export enum AppStep {
   Discovery = 1,
   JDInput = 2,
   ResumeGen = 3,
   MockInterview = 4
+}
+
+export interface ChatTurn {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
 }
 
 export interface ProjectAsset {
@@ -35,6 +40,7 @@ export interface ResumeProject {
 export interface InterviewFeedback {
   question: string;
   userAnswer: string;
+  summary: string;
   gaps: string[];
   assetReferences: string[];
   improvement: string;
@@ -47,4 +53,6 @@ export interface AppState {
   selectedJdId: string | null;
   generatedResume: ResumeProject[];
   interviewHistory: InterviewFeedback[];
+  discoveryChat: ChatTurn[];
+  interviewChat: ChatTurn[];
 }

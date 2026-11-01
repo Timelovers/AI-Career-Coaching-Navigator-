@@ -1,93 +1,111 @@
-
-import React, { useState, useEffect } from 'react';
-import { AppState, ResumeProject, JDData } from '../types';
-import { generateResumeItems } from '../services/geminiService';
+import React, { useState } from 'react';
+import { AppStep, JDData, ProjectAsset, ResumeProject } from '../types';
+import ErrorBanner from './ErrorBanner';
+import { generateResume } from '../services/career';
+import { reportModelError } from '../services/errors';
 
 interface Props {
-  state: AppState;
-  // Fix: Added jd prop to Props interface as it is not part of AppState
+  assets: ProjectAsset[];
+  resume: ResumeProject[];
   jd: JDData | null;
   onResumeUpdate: (resume: ResumeProject[]) => void;
+  onNeedKey: (hint: string) => void;
+  onGoTo: (step: AppStep) => void;
   nextStep: () => void;
 }
 
-const Step3ResumeGen: React.FC<Props> = ({ state, jd, onResumeUpdate, nextStep }) => {
+const Step3ResumeGen: React.FC<Props> = ({ assets, resume, jd, onResumeUpdate, onNeedKey, onGoTo, nextStep }) => {
   const [loading, setLoading] = useState(false);
-
-  useEffect(() => {
-    // Fix: Updated state.jd to jd
-    if (state.assets.length > 0 && jd && state.generatedResume.length === 0) {
-      handleGenerate();
-    }
-  }, []);
+  const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
 
   const handleGenerate = async () => {
-    // Fix: Updated state.jd to jd
-    if (!jd) return;
+    if (!jd || assets.length === 0 || loading) return;
     setLoading(true);
+    setError(null);
     try {
-      // Fix: Updated state.jd to jd
-      const items = await generateResumeItems(state.assets, jd);
+      const items = await generateResume(assets, jd);
+      if (items.length === 0) {
+        setError('模型没有返回可用的项目描述，请再试一次。');
+        return;
+      }
       onResumeUpdate(items);
     } catch (err) {
-      console.error(err);
+      setError(reportModelError(err, onNeedKey));
     } finally {
       setLoading(false);
     }
   };
 
+  const copyAll = async () => {
+    const text = resume.map((item) => `${item.name}\n${item.description}`).join('\n\n');
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1600);
+    } catch {
+      setError('复制失败，请手动选择文本。');
+    }
+  };
+
   return (
-    <div className="max-w-4xl mx-auto p-8">
-      <div className="flex justify-between items-center mb-8">
+    <div className="mx-auto max-w-4xl">
+      <div className="mb-8 flex flex-wrap items-center justify-between gap-4">
         <div>
-          <h2 className="text-2xl font-bold text-slate-800">第三阶段：定制化简历描述</h2>
-          {/* Fix: Updated state.jd to jd */}
-          <p className="text-slate-600">已将 {state.assets.length} 个项目素材适配至 "{jd?.company}" 的职位要求</p>
+          <h2 className="text-2xl font-bold text-slate-800">定制化简历描述</h2>
+          <p className="text-slate-600">
+            {jd ? `把 ${assets.length} 条素材对齐到 ${jd.company} · ${jd.title}` : '先选择一个目标职位'}
+          </p>
         </div>
-        <button
-          onClick={handleGenerate}
-          className="text-blue-600 hover:text-blue-700 font-medium flex items-center gap-1"
-        >
-          <i className="fas fa-sync-alt"></i> 重新生成
+        <button type="button" onClick={handleGenerate} disabled={loading || !jd || assets.length === 0} className="flex items-center gap-2 rounded-xl bg-blue-600 px-4 py-2 font-bold text-white disabled:opacity-40">
+          <i className="fas fa-sync-alt"></i> {resume.length ? '重新生成' : '生成简历'}
         </button>
       </div>
 
-      {loading ? (
-        <div className="flex flex-col items-center justify-center py-20 bg-white rounded-2xl shadow-sm">
-          <div className="w-12 h-12 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mb-4"></div>
-          <p className="text-slate-600">正在运用 STAR 法则和 JD 关键词进行深度融合...</p>
+      <ErrorBanner message={error} />
+
+      {!jd || assets.length === 0 ? (
+        <div className="rounded-3xl border border-dashed border-slate-200 bg-white px-8 py-16 text-center">
+          <p className="mb-6 text-slate-500">生成简历需要至少一条项目素材，以及一个已选中的 JD。</p>
+          <div className="flex justify-center gap-3">
+            <button type="button" onClick={() => onGoTo(AppStep.Discovery)} className="rounded-xl bg-slate-100 px-4 py-2 text-sm font-bold text-slate-700">去补充素材</button>
+            <button type="button" onClick={() => onGoTo(AppStep.JDInput)} className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-bold text-white">去选择 JD</button>
+          </div>
+        </div>
+      ) : loading ? (
+        <div className="flex flex-col items-center justify-center rounded-3xl bg-white py-20 shadow-sm">
+          <div className="mb-4 h-12 w-12 animate-spin rounded-full border-4 border-blue-600 border-t-transparent"></div>
+          <p className="text-slate-600">正在按 STAR 整理，并只使用素材里已经写明的事实…</p>
         </div>
       ) : (
-        <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
-          <div className="p-10">
-            <div className="border-b-2 border-slate-900 pb-2 mb-8">
+        <div className="overflow-hidden rounded-3xl border border-slate-100 bg-white shadow-sm">
+          <div className="p-8 sm:p-10">
+            <div className="mb-8 border-b-2 border-slate-900 pb-2">
               <h3 className="text-xl font-bold text-slate-900">项目经历 / PROJECT EXPERIENCE</h3>
             </div>
-            {state.generatedResume.map((proj, idx) => (
-              <div key={idx} className="mb-8">
-                <div className="flex justify-between items-baseline mb-2">
-                  <h4 className="font-bold text-slate-800 text-lg">{proj.name}</h4>
-                  <span className="text-xs bg-green-50 text-green-600 px-2 py-1 rounded border border-green-200 font-bold">JD 匹配度: {Math.round(proj.matchScore * 100)}%</span>
+            {resume.map((project, index) => (
+              <div key={`${project.name}-${index}`} className="mb-8">
+                <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+                  <h4 className="text-lg font-bold text-slate-800">{project.name}</h4>
+                  <span className="rounded border border-green-200 bg-green-50 px-2 py-1 text-xs font-bold text-green-700">
+                    JD 匹配度: {Math.round(project.matchScore * 100)}%
+                  </span>
                 </div>
-                <div className="text-sm text-slate-700 leading-relaxed whitespace-pre-line font-sans">
-                  {proj.description}
-                </div>
+                <div className="whitespace-pre-line text-sm leading-relaxed text-slate-700">{project.description}</div>
               </div>
             ))}
-            
-            {state.generatedResume.length === 0 && (
-              <div className="text-center py-10 text-slate-400 italic">暂无简历文案，请确保已完成前面的步骤。</div>
-            )}
+            {resume.length === 0 && <div className="py-10 text-center italic text-slate-400">还没有生成文案。点击右上角「生成简历」。</div>}
           </div>
-          
-          <div className="bg-slate-50 p-6 flex justify-between items-center border-t border-slate-100">
-            <p className="text-sm text-slate-500">以上是为您生成的简历核心模块预览。建议复制到正式简历中使用。</p>
-            <button
-              onClick={nextStep}
-              className="px-8 py-3 bg-blue-600 text-white rounded-lg font-semibold hover:bg-blue-700 transition-colors shadow-md"
-            >
-              进入模拟面试 <i className="fas fa-chevron-right ml-2"></i>
-            </button>
+          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 bg-slate-50 p-6">
+            <p className="text-sm text-slate-500">占位符「待补充」表示素材里没有对应数字，请自行核实后再写进正式简历。</p>
+            <div className="flex gap-2">
+              <button type="button" onClick={copyAll} disabled={resume.length === 0} className="rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm font-bold text-slate-700 disabled:opacity-40">
+                {copied ? '已复制' : '复制全部'}
+              </button>
+              <button type="button" onClick={nextStep} className="rounded-lg bg-blue-600 px-6 py-3 font-semibold text-white hover:bg-blue-700">
+                进入模拟面试 <i className="fas fa-chevron-right ml-2"></i>
+              </button>
+            </div>
           </div>
         </div>
       )}
